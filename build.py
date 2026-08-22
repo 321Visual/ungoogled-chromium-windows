@@ -23,7 +23,7 @@ import downloads
 import domain_substitution
 import prune_binaries
 import patches
-from _common import ENCODING, USE_REGISTRY, ExtractorEnum, get_logger
+from _common import ENCODING, USE_REGISTRY, ExtractorEnum, get_logger, get_chromium_version
 sys.path.pop(0)
 
 _ROOT_DIR = Path(__file__).resolve().parent
@@ -104,6 +104,151 @@ def _make_tmp_paths():
         tmp_path.mkdir()
 
 
+def _resolve_upstream_change_id(tag, disable_ssl_verification=False, source_tree=None):
+    """
+    Resolve the upstream Gerrit Change-Id for a release tag.
+
+    Strategy (in order):
+      1. If a local git checkout is available (clone mode, or after the
+         snapshot / patched tags have been created), read the Change-Id
+         straight from the tag's commit message. This works fully offline and
+         is what makes the synthesized commit mirror the real upstream one.
+      2. Otherwise (tarball mode, before any local tag exists) fetch the commit
+         metadata from googlesource, retrying a few times because that host is
+         frequently slow/blocked. Falls back to a zeroed Change-Id when the
+         upstream repo cannot be reached (e.g. offline / firewalled builds).
+    """
+    fallback = 'I0000000000000000000000000000000000000000'
+    try:
+        import json
+        import ssl
+        import urllib.request
+        url = ('https://chromium.googlesource.com/chromium/src/+/'
+               'refs/tags/%s?format=JSON' % tag)
+        ctx = ssl.create_default_context()
+        if disable_ssl_verification:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        raw = None
+        last_exc = None
+        for _ in range(3):
+            try:
+                with urllib.request.urlopen(url, timeout=30, context=ctx) as resp:
+                    raw = resp.read().decode('utf-8', 'replace')
+                break
+            except Exception as exc:  # transient network errors
+                last_exc = exc
+        if raw is None:
+            get_logger().warning(
+                'Could not resolve upstream Change-Id for tag %s (%s); using fallback.',
+                tag, last_exc)
+            return fallback
+        # googlesource prefixes its JSON responses with ")]}'"
+        if raw.startswith(')]}\''):
+            raw = raw[4:]
+        message = json.loads(raw).get('message', '')
+        match = re.search(r'^Change-Id:\s*(I[0-9a-fA-F]{40})\s*$', message, re.MULTILINE)
+        if match:
+            return match.group(1)
+        get_logger().warning(
+            'Upstream commit for tag %s has no Change-Id footer; using fallback.', tag)
+    except Exception as exc:  # network/parse best-effort
+        get_logger().warning(
+            'Could not resolve upstream Change-Id for tag %s (%s); using fallback.', tag, exc)
+    return fallback
+
+
+def _git(*args, cwd):
+    """Run a git command in *cwd*, raising on failure; stdout/stderr suppressed."""
+    subprocess.run(
+        ['git', *args],
+        cwd=str(cwd),
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _init_git_snapshot(source_tree, version, disable_ssl_verification=False):
+    """
+    Initialize a git repository for an unpacked tarball checkout.
+
+    The upstream Chromium build relies on a git checkout for several steps:
+    ``git describe`` (version stamping), dirmd's ``git ls-files`` discovery of
+    ``DIR_METADATA`` files, and various ``path_exists("//.git")`` GN guards.
+    Clone mode already provides a real ``.git``; tarball mode does not, so we
+    synthesize one from the unpacked tree. Idempotent: skipped if ``.git``
+    already exists.
+    """
+    if (source_tree / '.git').exists():
+        get_logger().info('Source tree already contains a .git directory; '
+                          'skipping git snapshot initialization.')
+        return
+    get_logger().info('Initializing git snapshot for tarball checkout (tag %s)...', version)
+    change_id = _resolve_upstream_change_id(version, disable_ssl_verification, source_tree)
+
+    _git('init', cwd=source_tree)
+    _git('config', 'core.longpaths', 'true', cwd=source_tree)
+    _git('add', '-A', cwd=source_tree)
+    _git('-c', 'user.email=build@ungoogled-chromium.local',
+         '-c', 'user.name=ungoogled-chromium',
+         'commit', '-m', 'Snapshot for %s' % version,
+         '-m', 'Change-Id: %s' % change_id,
+         cwd=source_tree)
+    _git('tag', version, cwd=source_tree)
+    get_logger().info('Source snapshot committed and tagged as %s (Change-Id: %s)',
+                      version, change_id)
+
+
+def _commit_patched_snapshot(source_tree, version, disable_ssl_verification=False):
+    """
+    Commit the fully-patched source tree and tag it as ``<version>-patched``.
+
+    Run after all patches and domain substitution so custom development can
+    branch from a clean, fully-patched baseline. A git repo is created only if
+    missing; if the ``<version>-patched`` tag already exists (a re-run), the
+    patched commit is amended and the tag force-updated.
+    """
+    patched_tag = '%s-patched' % version
+
+    # Initialize git only when a repo does not already exist.
+    if not (source_tree / '.git').exists():
+        get_logger().info('No .git found; initializing git repo before '
+                          'committing patched snapshot...')
+        _git('init', cwd=source_tree)
+        _git('config', 'core.longpaths', 'true', cwd=source_tree)
+
+    change_id = _resolve_upstream_change_id(version, disable_ssl_verification, source_tree)
+    _git('add', '-A', cwd=source_tree)
+
+    tag_exists = subprocess.run(
+        ['git', 'rev-parse', '-q', '--verify', 'refs/tags/%s' % patched_tag],
+        cwd=source_tree, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+    if tag_exists:
+        # Re-run: amend the previous patched commit and force-move the tag so it
+        # always reflects the latest fully-patched tree. --allow-empty keeps the
+        # re-run working even when nothing changed since the last build.
+        _git('commit', '--amend', '--allow-empty',
+             '-c', 'user.email=build@ungoogled-chromium.local',
+             '-c', 'user.name=ungoogled-chromium',
+             '-m', 'Patched snapshot for %s' % version,
+             '-m', 'Change-Id: %s' % change_id,
+             cwd=source_tree)
+        _git('tag', '-f', patched_tag, cwd=source_tree)
+        get_logger().info('Patched snapshot amended and force-tagged as %s', patched_tag)
+    else:
+        _git('commit',
+             '-c', 'user.email=build@ungoogled-chromium.local',
+             '-c', 'user.name=ungoogled-chromium',
+             '-m', 'Patched snapshot for %s' % version,
+             '-m', 'Change-Id: %s' % change_id,
+             cwd=source_tree)
+        _git('tag', patched_tag, cwd=source_tree)
+        get_logger().info('Fully-patched source committed and tagged as %s', patched_tag)
+
+
 def main():
     """CLI Entrypoint"""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -177,6 +322,13 @@ def main():
             # Unpack chromium tarball
             get_logger().info('Unpacking chromium tarball...')
             downloads.unpack_downloads(download_info, downloads_cache, None, source_tree, extractors)
+
+            # Tarball mode has no .git, but the Chromium build depends on git
+            # (git describe for version stamping, dirmd's git ls-files for
+            # DIR_METADATA discovery, and //.git GN guards). Synthesize a git
+            # snapshot so the rest of the pipeline behaves like a real checkout.
+            target_version = get_chromium_version()
+            _init_git_snapshot(source_tree, target_version, args.disable_ssl_verification)
         else:
             # Clone sources
             subprocess.run([sys.executable, str(Path('ungoogled-chromium', 'utils', 'clone.py')), '-o', 'build\\src', '-p', 'win32' if args.x86 else 'win-arm64' if args.arm else 'win64'], check=True)
@@ -235,6 +387,12 @@ def main():
             source_tree,
             None
         )
+
+        # After all patches and domain substitution, commit the fully-patched
+        # source tree and tag it as <version>-patched. This gives downstream
+        # custom development a clean, fully-patched baseline to branch from.
+        target_version = get_chromium_version()
+        _commit_patched_snapshot(source_tree, target_version, args.disable_ssl_verification)
 
     # Check if rust-toolchain folder has been populated
     HOST_CPU_IS_64BIT = sys.maxsize > 2**32

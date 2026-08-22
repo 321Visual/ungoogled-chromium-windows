@@ -1,0 +1,21 @@
+# .clangd 配置文件
+If:
+  PathExclude:
+    - .*/src/android_webview/.*
+    - .*/src/ios/.*
+    - .*/src/fuchsia/.*
+    - .*/src/chromeos/.*
+    - .*/src/ash/.*
+    - .*/src/linux/.*
+    - .*/src/mac/.*
+    - .*/src/win/.*
+    - .*/src/testing/.*
+    - .*/src/tools/.*
+    - .*/src/third_party/.*
+    - .*/src/breakpad/.*
+    - .*/src/device/.*
+    - .*/src/skia/.*
+    - .*/src/sql/.*
+    - .*/src/apps/.*
+    - .*/src/sandbox/.*
+    - .*/src/cc/.*
