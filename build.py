@@ -19,11 +19,11 @@ import ctypes
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'ungoogled-chromium' / 'utils'))
-import downloads
-import domain_substitution
-import prune_binaries
+import downloads # type: ignore
+import domain_substitution # type: ignore
+import prune_binaries # type: ignore
 import patches
-from _common import ENCODING, USE_REGISTRY, ExtractorEnum, get_logger, get_chromium_version
+from _common import ENCODING, USE_REGISTRY, ExtractorEnum, get_logger, get_chromium_version # type: ignore
 sys.path.pop(0)
 
 _ROOT_DIR = Path(__file__).resolve().parent
@@ -164,8 +164,8 @@ def _git(*args, cwd):
         ['git', *args],
         cwd=str(cwd),
         check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
 
 
@@ -216,37 +216,16 @@ def _commit_patched_snapshot(source_tree, version, disable_ssl_verification=Fals
         get_logger().info('No .git found; initializing git repo before '
                           'committing patched snapshot...')
         _git('init', cwd=source_tree)
-        _git('config', 'core.longpaths', 'true', cwd=source_tree)
 
     change_id = _resolve_upstream_change_id(version, disable_ssl_verification, source_tree)
+    _git('config', 'core.longpaths', 'true', cwd=source_tree)
     _git('add', '-A', cwd=source_tree)
-
-    tag_exists = subprocess.run(
-        ['git', 'rev-parse', '-q', '--verify', 'refs/tags/%s' % patched_tag],
-        cwd=source_tree, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    ).returncode == 0
-
-    if tag_exists:
-        # Re-run: amend the previous patched commit and force-move the tag so it
-        # always reflects the latest fully-patched tree. --allow-empty keeps the
-        # re-run working even when nothing changed since the last build.
-        _git('commit', '--amend', '--allow-empty',
-             '-c', 'user.email=build@ungoogled-chromium.local',
-             '-c', 'user.name=ungoogled-chromium',
-             '-m', 'Patched snapshot for %s' % version,
-             '-m', 'Change-Id: %s' % change_id,
-             cwd=source_tree)
-        _git('tag', '-f', patched_tag, cwd=source_tree)
-        get_logger().info('Patched snapshot amended and force-tagged as %s', patched_tag)
-    else:
-        _git('commit',
-             '-c', 'user.email=build@ungoogled-chromium.local',
-             '-c', 'user.name=ungoogled-chromium',
-             '-m', 'Patched snapshot for %s' % version,
-             '-m', 'Change-Id: %s' % change_id,
-             cwd=source_tree)
-        _git('tag', patched_tag, cwd=source_tree)
-        get_logger().info('Fully-patched source committed and tagged as %s', patched_tag)
+    _git('commit',
+            '-m', 'Patched snapshot for %s' % version,
+            '-m', 'Change-Id: %s' % change_id,
+            cwd=source_tree)
+    _git('tag', patched_tag, cwd=source_tree)
+    get_logger().info('Fully-patched source committed and tagged as %s', patched_tag)
 
 
 def main():
@@ -388,12 +367,6 @@ def main():
             None
         )
 
-        # After all patches and domain substitution, commit the fully-patched
-        # source tree and tag it as <version>-patched. This gives downstream
-        # custom development a clean, fully-patched baseline to branch from.
-        target_version = get_chromium_version()
-        _commit_patched_snapshot(source_tree, target_version, args.disable_ssl_verification)
-
     # Check if rust-toolchain folder has been populated
     HOST_CPU_IS_64BIT = sys.maxsize > 2**32
     RUST_DIR_DST = source_tree / 'third_party' / 'rust-toolchain'
@@ -429,6 +402,12 @@ def main():
         # Generate version file
         with open(RUST_FLAG_FILE, 'w') as f:
             subprocess.run([source_tree / 'third_party' / 'rust-toolchain-x64' / 'rustc' / 'bin' / 'rustc.exe', '--version'], stdout=f)
+
+    # After all patches and domain substitution, commit the fully-patched
+    # source tree and tag it as <version>-patched. This gives downstream
+    # custom development a clean, fully-patched baseline to branch from.
+    target_version = get_chromium_version()
+    _commit_patched_snapshot(source_tree, target_version, args.disable_ssl_verification)
 
     if not args.ci or not (source_tree / 'out/Default').exists():
         # Output args.gn

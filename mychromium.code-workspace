@@ -11,30 +11,7 @@
     "git.detectSubmodulesLimit": 0,
     // 隐藏你不需要看到的目录（减少文件列表干扰）
     "files.exclude": {
-      "src/out": true,
-      "src/build": true,
-      "src/build_overrides": true,
-      "src/buildtools": true,
-      "src/tools": true,
-      "src/infra": true,
-      "**/.git": true,
-      "src/third_party": true,
-      "src/ios": true,
-      "src/ios_internal": true,
-      "src/android_webview": true,
-      "src/chromeos": true,
-      "src/fuchsia": true,
-      "src/mac": true,
-      "src/remoting": true,
-      "src/printing": true,
-      "src/native_client": true,
-      "src/media": true,
-      "src/net": true,
-      "src/components/cast": true,
-      "src/components/cast_channel": true,
-      "src/gpu": true,
-      "src/v8": true,
-      // 注意：不隐藏 src/third_party，它会显示，但我们会在搜索和监视中排除
+      "build": true,
     },
     // 搜索时排除不需要的目录（不影响文件列表显示）
     "search.exclude": {
@@ -67,37 +44,24 @@
       "-j=4",
       "--header-insertion=never"
     ],
-        
+    // 显式指定 C/C++ 默认格式化工具为 clangd，避免多个 formatter 冲突弹窗
+    "[c]": {
+      "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+    },
+    "[cpp]": {
+      "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+    },
+
     // ===== Python/Pylance 优化 =====
     "python.languageServer": "Pylance",
     // Python 分析排除（避免分析不需要的目录）
     "python.analysis.exclude": [
       "**/out",
       "**/build",
-      "**/buildtools",
-      "**/tools",
-      "**/third_party",
-      "**/testing",
-      "**/ios",
-      "**/android_webview",
-      "**/fuchsia",
-      "**/chromeos",
-      "**/linux",
-      "**/mac",
-      "**/win",
-      "**/node_modules",
-      "**/__pycache__",
-      "**/*.pyc",
-      "**/build/src"
     ],
     "python.analysis.ignore": [
       "**/out/**",
       "**/build/**",
-      "**/buildtools/**",
-      "**/tools/**",
-      "**/third_party/**",
-      "**/testing/**",
-      "**/build/src"
     ],
   },
   "extensions": {
